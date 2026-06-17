@@ -15,8 +15,8 @@ OpenBlockLabs 自动注册 (WorkOS AuthKit)
 pip install curl_cffi requests
 """
 
-import re, json, time, base64, random, string, os
-from urllib.parse import urlencode, urlparse, parse_qs
+import re, json, time, base64, random, string
+from urllib.parse import urlencode, urlparse, parse_qs, urljoin
 from curl_cffi import requests as curl_requests
 import requests as std_requests
 from core.proxy_utils import build_requests_proxy_config
@@ -140,6 +140,87 @@ class OpenBlockLabsRegister:
                 return match.group(1)
         return None
 
+    def _normalize_auth_landing_url(self, url: str) -> str:
+        """curl_cffi 常落在 /sign-up?client_id=...，需改成 /?client_id=... 才有 action ID。"""
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        if not parsed.path.rstrip("/").endswith("/sign-up") or not qs.get("client_id"):
+            return url
+        query = urlencode(
+            {
+                "client_id": qs["client_id"][0],
+                "redirect_uri": qs.get("redirect_uri", [DASHBOARD_CALLBACK])[0],
+                "authorization_session_id": qs.get("authorization_session_id", [""])[0],
+            }
+        )
+        return f"{AUTH_BASE}/?{query}"
+
+    def _sync_session_from_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        session_id = qs.get("authorization_session_id", [None])[0]
+        if session_id:
+            self.authorization_session_id = session_id
+
+    def _follow_auth_redirects(self, start_url: str, params: dict = None):
+        """手动跟随重定向，把 /sign-up?client_id=... 规范到 /?client_id=...。"""
+        url = start_url
+        query_params = params
+        for _ in range(15):
+            r = self.s.get(
+                url,
+                params=query_params,
+                headers=self._get_headers(),
+                allow_redirects=False,
+            )
+            query_params = None
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("location", "")
+                if not loc:
+                    return r
+                url = self._normalize_auth_landing_url(urljoin(str(r.url), loc))
+                continue
+            return r
+        return r
+
+    def _copy_cookies_from_session(self, other) -> None:
+        for cookie in other.cookies:
+            self.s.cookies.set(
+                cookie.name,
+                cookie.value,
+                domain=cookie.domain,
+                path=cookie.path,
+            )
+
+    def _fetch_signup_via_stdlib(self) -> bool:
+        """curl_cffi 拿不到 action 时，用标准 requests 拉注册页并同步 cookie。"""
+        self.log("  回退 std requests GET /sign-up")
+        std_s = std_requests.Session()
+        if self.s.proxies:
+            std_s.proxies.update(self.s.proxies)
+        std_s.headers.update(
+            {
+                "user-agent": UA,
+                "accept-language": "zh-CN,zh;q=0.9",
+            }
+        )
+        r = std_s.get(
+            f"{AUTH_BASE}/sign-up",
+            params={"redirect_uri": DASHBOARD_CALLBACK},
+            allow_redirects=True,
+            timeout=30,
+        )
+        final_url = str(r.url)
+        self._sync_session_from_url(final_url)
+        self._copy_cookies_from_session(std_s)
+        self._action_id = self._extract_action_id(r.text)
+        self.log(f"  std final_url={final_url[:120]}...")
+        if self._action_id:
+            self.log(f"  std action={self._action_id[:16]}...")
+        else:
+            self.log(f"  std 仍未解析到 action, html_len={len(r.text)}")
+        return bool(self._action_id)
+
     def _post_action(self, url: str, fields: list, router_state: str):
         all_fields = fields + [("0", '["$K1"]')]
         body, ct = _build_multipart(all_fields)
@@ -162,11 +243,7 @@ class OpenBlockLabsRegister:
 
     def _sync_session_from_response(self, r) -> str:
         final_url = str(r.url)
-        parsed = urlparse(final_url)
-        qs = parse_qs(parsed.query)
-        session_id = qs.get("authorization_session_id", [None])[0]
-        if session_id:
-            self.authorization_session_id = session_id
+        self._sync_session_from_url(final_url)
         if not self.authorization_session_id:
             for rr in r.history:
                 loc = rr.headers.get("location", "")
@@ -177,55 +254,77 @@ class OpenBlockLabsRegister:
         return final_url
 
     def _fetch_auth_root_page(self) -> bool:
-        """curl_cffi 有时停在 /sign-up，需再拉取 / 页面才有 next-action ID。"""
+        """补拉 /?client_id=... 页面；禁止自动重定向，避免再次跳回 /sign-up。"""
         if not self.authorization_session_id:
             return False
-        root_url = f"{AUTH_BASE}/?" + urlencode(
+        root_url = f"{AUTH_BASE}/?{urlencode(
             {
-                "client_id": CLIENT_ID,
-                "redirect_uri": DASHBOARD_CALLBACK,
-                "authorization_session_id": self.authorization_session_id,
+                'client_id': CLIENT_ID,
+                'redirect_uri': DASHBOARD_CALLBACK,
+                'authorization_session_id': self.authorization_session_id,
             }
-        )
-        self.log("  补拉 GET /?client_id=... 解析 next-action ID")
+        )}"
+        self.log("  补拉 GET /?client_id=... (no redirect)")
         r = self.s.get(
             root_url,
             headers=self._get_headers(),
-            allow_redirects=True,
+            allow_redirects=False,
         )
-        self._sync_session_from_response(r)
-        self._action_id = self._extract_action_id(r.text)
-        if self._action_id:
-            self.log(f"  根路径页面 action={self._action_id[:16]}...")
-        else:
-            self.log(f"  根路径仍未解析到 action, html_len={len(r.text)}")
-        return bool(self._action_id)
+        if r.status_code in (301, 302, 303, 307, 308):
+            loc = r.headers.get("location", "")
+            self.log(f"  根路径返回 {r.status_code} -> {loc[:120]}")
+            norm = self._normalize_auth_landing_url(urljoin(root_url, loc))
+            if norm != urljoin(root_url, loc):
+                r = self.s.get(
+                    norm,
+                    headers=self._get_headers(),
+                    allow_redirects=False,
+                )
+        if r.status_code == 200:
+            self._sync_session_from_response(r)
+            self._action_id = self._extract_action_id(r.text)
+            if self._action_id:
+                self.log(f"  根路径页面 action={self._action_id[:16]}...")
+            else:
+                self.log(f"  根路径仍未解析到 action, html_len={len(r.text)}")
+            return bool(self._action_id)
+        self.log(f"  根路径 HTTP {r.status_code}")
+        return False
 
     def step1_initiate_signup(self) -> bool:
         """GET auth.openblocklabs.com/sign-up → authorization_session_id + action ID"""
         self.log("Step1: GET /sign-up")
+        r = None
         for attempt in range(5):
-            r = self.s.get(
+            r = self._follow_auth_redirects(
                 f"{AUTH_BASE}/sign-up",
                 params={"redirect_uri": DASHBOARD_CALLBACK},
-                headers=self._get_headers(),
-                allow_redirects=True,
             )
             if r.status_code == 200:
                 break
             self.log(f"  CF拦截 (status={r.status_code}), 重试 {attempt + 1}/5...")
             time.sleep(2)
         final_url = self._sync_session_from_response(r)
+        if "/sign-up" in urlparse(final_url).path and "client_id" in final_url:
+            norm = self._normalize_auth_landing_url(final_url)
+            self.log(f"  规范化 landing URL -> {norm[:120]}...")
+            r = self.s.get(
+                norm,
+                headers=self._get_headers(),
+                allow_redirects=False,
+            )
+            if r.status_code == 200:
+                final_url = str(r.url)
+                self._sync_session_from_response(r)
         self._action_id = self._extract_action_id(r.text)
-        self.log(
-            f"  final_url={final_url[:120]}..."
-        )
+        self.log(f"  final_url={final_url[:120]}...")
         self.log(
             f"  session_id={self.authorization_session_id}, action={self._action_id and self._action_id[:16]}..."
         )
         if not self._action_id:
             self.log(f"  首次页面未解析到 next-action ID, html_len={len(r.text)}")
-            self._fetch_auth_root_page()
+            if not self._fetch_auth_root_page():
+                self._fetch_signup_via_stdlib()
         return bool(self.authorization_session_id and self._action_id)
 
     def step2_get_signup_page(self) -> bool:
