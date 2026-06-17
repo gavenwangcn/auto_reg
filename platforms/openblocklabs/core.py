@@ -129,8 +129,16 @@ class OpenBlockLabsRegister:
         return h
 
     def _extract_action_id(self, text: str) -> str:
-        m = re.search(r'\\?"id\\?":\\?"([a-f0-9]{40})\\?"', text)
-        return m.group(1) if m else None
+        patterns = (
+            r'\\?"id\\?":\\?"([a-f0-9]{40})\\?"',
+            r'\\"id\\":\\"([a-f0-9]{40})\\"',
+            r'"id":"([a-f0-9]{40})"',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return None
 
     def _post_action(self, url: str, fields: list, router_state: str):
         all_fields = fields + [("0", '["$K1"]')]
@@ -181,7 +189,9 @@ class OpenBlockLabsRegister:
         self.log(
             f"  session_id={self.authorization_session_id}, action={self._action_id and self._action_id[:16]}..."
         )
-        return bool(self.authorization_session_id)
+        if not self._action_id:
+            self.log(f"  未解析到 next-action ID, html_len={len(r.text)}")
+        return bool(self.authorization_session_id and self._action_id)
 
     def step2_get_signup_page(self) -> bool:
         """已在 step1 完成，直接返回 True"""
