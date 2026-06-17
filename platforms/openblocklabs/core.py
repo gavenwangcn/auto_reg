@@ -16,7 +16,7 @@ pip install curl_cffi requests
 """
 
 import re, json, time, base64, random, string
-from urllib.parse import urlencode, urlparse, parse_qs, urljoin
+from urllib.parse import urlencode, urlparse, parse_qs, urljoin, quote
 from curl_cffi import requests as curl_requests
 import requests as std_requests
 from core.proxy_utils import build_requests_proxy_config
@@ -112,6 +112,7 @@ class OpenBlockLabsRegister:
         )
         self.authorization_session_id = None
         self._action_id = None
+        self._landing_url = None
 
     def log(self, msg):
         print(f"[REG] {msg}")
@@ -214,12 +215,175 @@ class OpenBlockLabsRegister:
         self._sync_session_from_url(final_url)
         self._copy_cookies_from_session(std_s)
         self._action_id = self._extract_action_id(r.text)
+        self._landing_url = final_url
         self.log(f"  std final_url={final_url[:120]}...")
         if self._action_id:
             self.log(f"  std action={self._action_id[:16]}...")
         else:
             self.log(f"  std 仍未解析到 action, html_len={len(r.text)}")
         return bool(self._action_id)
+
+    def _auth_params(self) -> dict:
+        return {
+            "client_id": CLIENT_ID,
+            "redirect_uri": DASHBOARD_CALLBACK,
+            "authorization_session_id": self.authorization_session_id,
+        }
+
+    def _auth_url(self, path: str = "/") -> str:
+        if path == "/":
+            return f"{AUTH_BASE}/?{urlencode(self._auth_params())}"
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"{AUTH_BASE}{path}?{urlencode(self._auth_params())}"
+
+    def _page_search_params(self) -> str:
+        return json.dumps(
+            {
+                "redirect_uri": DASHBOARD_CALLBACK,
+                "authorization_session_id": self.authorization_session_id,
+            },
+            separators=(",", ":"),
+        )
+
+    def _encode_router_state(self, tree) -> str:
+        return quote(json.dumps(tree, separators=(",", ":")), safe="")
+
+    def _router_state_sign_in_page(self) -> str:
+        qs = self._page_search_params()
+        tree = [
+            "",
+            {
+                "children": [
+                    "(main)",
+                    {
+                        "children": [
+                            "(root)",
+                            {
+                                "children": [
+                                    "(sign-in)",
+                                    {
+                                        "children": [
+                                            f"__PAGE__?{qs}",
+                                            {},
+                                            None,
+                                            None,
+                                        ]
+                                    },
+                                    None,
+                                    None,
+                                ]
+                            },
+                            None,
+                            None,
+                        ]
+                    },
+                    None,
+                    None,
+                ]
+            },
+            None,
+            None,
+            True,
+        ]
+        return self._encode_router_state(tree)
+
+    def _router_state_sign_up_password(self) -> str:
+        qs = self._page_search_params()
+        tree = [
+            "",
+            {
+                "children": [
+                    "(main)",
+                    {
+                        "children": [
+                            "(root)",
+                            {
+                                "children": [
+                                    "sign-up",
+                                    {
+                                        "children": [
+                                            "password",
+                                            {
+                                                "children": [
+                                                    f"__PAGE__?{qs}",
+                                                    {},
+                                                    None,
+                                                    None,
+                                                ]
+                                            },
+                                            None,
+                                            None,
+                                        ]
+                                    },
+                                    None,
+                                    None,
+                                ]
+                            },
+                            None,
+                            None,
+                        ]
+                    },
+                    None,
+                    None,
+                ]
+            },
+            None,
+            None,
+            True,
+        ]
+        return self._encode_router_state(tree)
+
+    def _router_state_email_verification(self) -> str:
+        qs = self._page_search_params()
+        tree = [
+            "",
+            {
+                "children": [
+                    "(main)",
+                    {
+                        "children": [
+                            "(root)",
+                            {
+                                "children": [
+                                    "(fixed-layout)",
+                                    {
+                                        "children": [
+                                            "email-verification",
+                                            {
+                                                "children": [
+                                                    f"__PAGE__?{qs}",
+                                                    {},
+                                                    None,
+                                                    None,
+                                                ]
+                                            },
+                                            None,
+                                            None,
+                                        ]
+                                    },
+                                    None,
+                                    None,
+                                ]
+                            },
+                            None,
+                            None,
+                        ]
+                    },
+                    None,
+                    None,
+                ]
+            },
+            None,
+            None,
+            True,
+        ]
+        return self._encode_router_state(tree)
+
+    def _is_signup_password_redirect(self, resp) -> bool:
+        redirect = resp.headers.get("x-action-redirect", "") or ""
+        body = resp.text or ""
+        return "sign-up/password" in redirect or "sign-up/password" in body
 
     def _post_action(self, url: str, fields: list, router_state: str):
         all_fields = fields + [("0", '["$K1"]')]
@@ -257,13 +421,14 @@ class OpenBlockLabsRegister:
         """补拉 /?client_id=... 页面；禁止自动重定向，避免再次跳回 /sign-up。"""
         if not self.authorization_session_id:
             return False
-        root_url = f"{AUTH_BASE}/?{urlencode(
+        root_query = urlencode(
             {
-                'client_id': CLIENT_ID,
-                'redirect_uri': DASHBOARD_CALLBACK,
-                'authorization_session_id': self.authorization_session_id,
+                "client_id": CLIENT_ID,
+                "redirect_uri": DASHBOARD_CALLBACK,
+                "authorization_session_id": self.authorization_session_id,
             }
-        )}"
+        )
+        root_url = f"{AUTH_BASE}/?{root_query}"
         self.log("  补拉 GET /?client_id=... (no redirect)")
         r = self.s.get(
             root_url,
@@ -283,6 +448,7 @@ class OpenBlockLabsRegister:
         if r.status_code == 200:
             self._sync_session_from_response(r)
             self._action_id = self._extract_action_id(r.text)
+            self._landing_url = root_url
             if self._action_id:
                 self.log(f"  根路径页面 action={self._action_id[:16]}...")
             else:
@@ -325,6 +491,11 @@ class OpenBlockLabsRegister:
             self.log(f"  首次页面未解析到 next-action ID, html_len={len(r.text)}")
             if not self._fetch_auth_root_page():
                 self._fetch_signup_via_stdlib()
+        self._landing_url = self._landing_url or final_url
+        if self._landing_url and urlparse(self._landing_url).path.rstrip("/").endswith(
+            "/sign-up"
+        ):
+            self._landing_url = self._normalize_auth_landing_url(self._landing_url)
         return bool(self.authorization_session_id and self._action_id)
 
     def step2_get_signup_page(self) -> bool:
@@ -332,19 +503,9 @@ class OpenBlockLabsRegister:
         return bool(self.authorization_session_id)
 
     def step3_submit_signup(self, email: str, first_name: str, last_name: str) -> bool:
-        """POST /sign-up (first_name/last_name/email/intent=sign-up) → 303 → /sign-up/password"""
-        self.log(f"Step3: POST /sign-up email={email}")
-        url = f"{AUTH_BASE}/sign-up?" + urlencode(
-            {
-                "redirect_uri": DASHBOARD_CALLBACK,
-                "authorization_session_id": self.authorization_session_id,
-            }
-        )
-        router_state = (
-            "%5B%22%22%2C%7B%22children%22%3A%5B%22%28main%29%22%2C%7B%22children%22%3A%5B%22%28root%29%22%2C"
-            "%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D"
-            "%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-        )
+        """POST auth landing page (sign-in route + intent=sign-up) → sign-up/password"""
+        self.log(f"Step3: POST signup email={email}")
+        url = self._landing_url or self._auth_url("/")
         resp = self._post_action(
             url,
             [
@@ -356,26 +517,25 @@ class OpenBlockLabsRegister:
                 ("1_intent", "sign-up"),
                 ("1_redirect_uri", DASHBOARD_CALLBACK),
                 ("1_authorization_session_id", self.authorization_session_id),
+                ("1_client_id", CLIENT_ID),
             ],
-            router_state,
+            self._router_state_sign_in_page(),
         )
+        redirect = resp.headers.get("x-action-redirect", "")
         self.log(f"  -> {resp.status_code}")
-        if resp.status_code != 303:
+        if redirect:
+            self.log(f"  x-action-redirect: {redirect[:120]}")
+        if resp.status_code != 303 and not self._is_signup_password_redirect(resp):
             self.log(f"  body[:300]: {(resp.text or '')[:300]}")
-        return resp.status_code == 303
+        return resp.status_code == 303 or self._is_signup_password_redirect(resp)
 
     def step4_get_password_page(self) -> bool:
         """GET /sign-up/password → 提取 next-action ID"""
         self.log("Step4: GET /sign-up/password")
-        url = f"{AUTH_BASE}/sign-up/password?" + urlencode(
-            {
-                "redirect_uri": DASHBOARD_CALLBACK,
-                "authorization_session_id": self.authorization_session_id,
-            }
-        )
+        url = self._auth_url("/sign-up/password")
         r = self.s.get(
             url,
-            headers=self._get_headers(referer=f"{AUTH_BASE}/sign-up"),
+            headers=self._get_headers(referer=self._landing_url or self._auth_url("/")),
             allow_redirects=True,
         )
         self.log(f"  -> {r.status_code}")
@@ -390,18 +550,7 @@ class OpenBlockLabsRegister:
     ) -> str:
         """POST /sign-up/password → RSC body 包含 pendingAuthenticationToken"""
         self.log("Step5: POST /sign-up/password")
-        url = f"{AUTH_BASE}/sign-up/password?" + urlencode(
-            {
-                "redirect_uri": DASHBOARD_CALLBACK,
-                "authorization_session_id": self.authorization_session_id,
-            }
-        )
-        router_state = (
-            "%5B%22%22%2C%7B%22children%22%3A%5B%22%28main%29%22%2C%7B%22children%22%3A%5B%22%28root%29%22%2C"
-            "%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22password%22%2C%7B%22children%22%3A"
-            "%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D"
-            "%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-        )
+        url = self._auth_url("/sign-up/password")
         resp = self._post_action(
             url,
             [
@@ -414,8 +563,9 @@ class OpenBlockLabsRegister:
                 ("1_intent", "sign-up"),
                 ("1_redirect_uri", DASHBOARD_CALLBACK),
                 ("1_authorization_session_id", self.authorization_session_id),
+                ("1_client_id", CLIENT_ID),
             ],
-            router_state,
+            self._router_state_sign_up_password(),
         )
         self.log(f"  -> {resp.status_code}")
         body = resp.text
@@ -429,15 +579,10 @@ class OpenBlockLabsRegister:
     def step6_get_email_verification_page(self) -> bool:
         """GET /email-verification → 提取 next-action ID"""
         self.log("Step6: GET /email-verification")
-        url = f"{AUTH_BASE}/email-verification?" + urlencode(
-            {
-                "redirect_uri": DASHBOARD_CALLBACK,
-                "authorization_session_id": self.authorization_session_id,
-            }
-        )
+        url = self._auth_url("/email-verification")
         r = self.s.get(
             url,
-            headers=self._get_headers(referer=f"{AUTH_BASE}/sign-up/password"),
+            headers=self._get_headers(referer=self._auth_url("/sign-up/password")),
             allow_redirects=True,
         )
         self.log(f"  -> {r.status_code}")
@@ -450,17 +595,13 @@ class OpenBlockLabsRegister:
     def step7_submit_otp(self, email: str, code: str, pending_auth_token: str) -> str:
         """POST /email-verification → 303 → dashboard/auth/callback?code=..."""
         self.log(f"Step7: POST /email-verification code={code}")
-        url = f"{AUTH_BASE}/email-verification?" + urlencode(
-            {
-                "redirect_uri": DASHBOARD_CALLBACK,
-                "authorization_session_id": self.authorization_session_id,
-            }
-        )
+        url = self._auth_url("/email-verification")
         fields = [
             ("1_code", code),
             ("1_redirect_uri", DASHBOARD_CALLBACK),
             ("1_authorization_session_id", self.authorization_session_id),
             ("1_email", email),
+            ("1_client_id", CLIENT_ID),
         ]
         if pending_auth_token:
             fields.append(("1_pending_authentication_token", pending_auth_token))
@@ -475,7 +616,7 @@ class OpenBlockLabsRegister:
                 "origin": AUTH_BASE,
                 "referer": url,
                 "next-action": self._action_id,
-                "next-router-state-tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22%28main%29%22%2C%7B%22children%22%3A%5B%22%28root%29%22%2C%7B%22children%22%3A%5B%22%28fixed-layout%29%22%2C%7B%22children%22%3A%5B%22email-verification%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D",
+                "next-router-state-tree": self._router_state_email_verification(),
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-origin",

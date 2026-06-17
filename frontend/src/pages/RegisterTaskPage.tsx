@@ -46,6 +46,8 @@ export default function RegisterTaskPage() {
         moemail_api_url: cfg.moemail_api_url || '',
         moemail_api_key: cfg.moemail_api_key || '',
         skymail_api_base: cfg.skymail_api_base || 'https://api.skymail.ink',
+        skymail_email: cfg.skymail_email || '',
+        skymail_password: cfg.skymail_password || '',
         skymail_token: cfg.skymail_token || '',
         skymail_domain: cfg.skymail_domain || '',
         laoudo_auth: cfg.laoudo_auth || '',
@@ -120,6 +122,8 @@ export default function RegisterTaskPage() {
       moemail_api_url: values.moemail_api_url,
       moemail_api_key: values.moemail_api_key,
       skymail_api_base: values.skymail_api_base,
+      skymail_email: values.skymail_email,
+      skymail_password: values.skymail_password,
       skymail_token: values.skymail_token,
       skymail_domain: values.skymail_domain,
       duckmail_api_url: values.duckmail_api_url,
@@ -309,13 +313,19 @@ export default function RegisterTaskPage() {
           {mailProvider === 'skymail' && (
             <>
               <Form.Item name="skymail_api_base" label="API Base">
-                <Input placeholder="https://api.skymail.ink" />
+                <Input placeholder="https://mail.ongird.com" />
               </Form.Item>
-              <Form.Item name="skymail_token" label="Authorization Token">
-                <Input.Password placeholder="Bearer xxxxx" />
+              <Form.Item name="skymail_email" label="管理员邮箱">
+                <Input placeholder="admin@example.com" />
+              </Form.Item>
+              <Form.Item name="skymail_password" label="管理员密码">
+                <Input.Password placeholder="Cloud Mail 管理员密码" />
               </Form.Item>
               <Form.Item name="skymail_domain" label="邮箱域名">
-                <Input placeholder="mail.example.com" />
+                <Input placeholder="example.com" />
+              </Form.Item>
+              <Form.Item name="skymail_token" label="Authorization Token（可选）">
+                <Input.Password placeholder="留空则根据邮箱密码自动获取" />
               </Form.Item>
             </>
           )}

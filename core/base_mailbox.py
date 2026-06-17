@@ -221,6 +221,8 @@ def create_mailbox(
             api_base=extra.get("skymail_api_base", "https://api.skymail.ink"),
             auth_token=extra.get("skymail_token", ""),
             domain=extra.get("skymail_domain", ""),
+            email=extra.get("skymail_email", ""),
+            password=extra.get("skymail_password", ""),
             proxy=proxy,
         )
     elif provider == "duckmail":
@@ -592,11 +594,30 @@ class TempMailLolMailbox(BaseMailbox):
 class SkyMailMailbox(BaseMailbox):
     """SkyMail / CloudMail 自建邮箱服务"""
 
-    def __init__(self, api_base: str, auth_token: str, domain: str, proxy: str = None):
+    def __init__(
+        self,
+        api_base: str,
+        auth_token: str,
+        domain: str,
+        email: str = "",
+        password: str = "",
+        proxy: str = None,
+        persist_token: bool = True,
+    ):
         self.api = (api_base or "").rstrip("/")
         self.auth_token = auth_token or ""
         self.domain = domain or ""
+        self.email = (email or "").strip()
+        self.password = password or ""
         self.proxy = build_requests_proxy_config(proxy)
+        self.persist_token = persist_token
+        if self.email and self.password:
+            try:
+                self._refresh_token(force=True)
+            except Exception as exc:
+                if not self.auth_token:
+                    raise RuntimeError(f"SkyMail 自动获取 Token 失败: {exc}") from exc
+                self._log(f"[SkyMail] 自动刷新 Token 失败，继续使用已保存 Token: {exc}")
 
     def _headers(self) -> dict:
         return {
@@ -605,11 +626,67 @@ class SkyMailMailbox(BaseMailbox):
             "authorization": self.auth_token,
         }
 
+    def _refresh_token(self, force: bool = False) -> bool:
+        from core.skymail_auth import fetch_skymail_token, persist_skymail_token
+
+        if not self.email or not self.password:
+            return False
+        self.auth_token = fetch_skymail_token(
+            self.api,
+            self.email,
+            self.password,
+            proxy=self.proxy,
+        )
+        if self.persist_token:
+            persist_skymail_token(self.auth_token)
+        self._log("[SkyMail] Token 已自动刷新")
+        return True
+
+    def _ensure_token(self) -> None:
+        if self.email and self.password:
+            if not self.auth_token:
+                self._refresh_token(force=True)
+            return
+        if self.auth_token:
+            return
+        raise RuntimeError(
+            "SkyMail 未配置完整：请设置 skymail_email + skymail_password，或手动填写 skymail_token"
+        )
+
     def _ensure_config(self) -> None:
-        if not self.api or not self.auth_token or not self.domain:
+        if not self.api or not self.domain:
             raise RuntimeError(
-                "SkyMail 未配置完整：请设置 skymail_api_base、skymail_token、skymail_domain"
+                "SkyMail 未配置完整：请设置 skymail_api_base、skymail_domain"
             )
+        self._ensure_token()
+
+    def _post_json(self, path: str, payload: dict, *, retry_auth: bool = True):
+        import requests
+
+        self._ensure_config()
+        url = f"{self.api}{path}"
+        response = requests.post(
+            url,
+            json=payload,
+            headers=self._headers(),
+            proxies=self.proxy,
+            timeout=15,
+        )
+        if (
+            retry_auth
+            and response.status_code in (401, 403)
+            and self.email
+            and self.password
+            and self._refresh_token(force=True)
+        ):
+            response = requests.post(
+                url,
+                json=payload,
+                headers=self._headers(),
+                proxies=self.proxy,
+                timeout=15,
+            )
+        return response
 
     def _gen_prefix(self) -> str:
         import random
@@ -620,18 +697,10 @@ class SkyMailMailbox(BaseMailbox):
         return "".join(random.choice(chars) for _ in range(length))
 
     def get_email(self) -> MailboxAccount:
-        import requests
-
         self._ensure_config()
         email = f"{self._gen_prefix()}@{self.domain}"
         payload = {"list": [{"email": email}]}
-        r = requests.post(
-            f"{self.api}/api/public/addUser",
-            json=payload,
-            headers=self._headers(),
-            proxies=self.proxy,
-            timeout=15,
-        )
+        r = self._post_json("/api/public/addUser", payload)
         if r.status_code != 200:
             raise RuntimeError(f"SkyMail 创建邮箱失败: {r.status_code} {r.text[:200]}")
 
@@ -643,20 +712,12 @@ class SkyMailMailbox(BaseMailbox):
         return MailboxAccount(email=email, account_id=email)
 
     def _list_mails(self, email: str) -> list:
-        import requests
-
         payload = {
             "toEmail": email,
             "num": 1,
             "size": 20,
         }
-        r = requests.post(
-            f"{self.api}/api/public/emailList",
-            json=payload,
-            headers=self._headers(),
-            proxies=self.proxy,
-            timeout=15,
-        )
+        r = self._post_json("/api/public/emailList", payload, retry_auth=True)
         if r.status_code != 200:
             return []
         data = r.json()

@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from core.config_store import config_store
+from core.skymail_auth import SkyMailAuthError, fetch_skymail_token, persist_skymail_token
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -24,6 +25,8 @@ CONFIG_KEYS = [
     "moemail_api_url",
     "moemail_api_key",
     "skymail_api_base",
+    "skymail_email",
+    "skymail_password",
     "skymail_token",
     "skymail_domain",
     "mail_provider",
@@ -86,6 +89,12 @@ class ConfigUpdate(BaseModel):
     data: dict
 
 
+class SkyMailRefreshRequest(BaseModel):
+    skymail_api_base: str = ""
+    skymail_email: str = ""
+    skymail_password: str = ""
+
+
 @router.get("")
 def get_config():
     all_cfg = config_store.get_all()
@@ -105,3 +114,19 @@ def update_config(body: ConfigUpdate):
     safe = {k: v for k, v in body.data.items() if k in CONFIG_KEYS}
     config_store.set_many(safe)
     return {"ok": True, "updated": list(safe.keys())}
+
+
+@router.post("/skymail/refresh-token")
+def refresh_skymail_token(body: SkyMailRefreshRequest | None = None):
+    payload = body or SkyMailRefreshRequest()
+    api_base = (payload.skymail_api_base or config_store.get("skymail_api_base", "")).strip()
+    email = (payload.skymail_email or config_store.get("skymail_email", "")).strip()
+    password = payload.skymail_password or config_store.get("skymail_password", "")
+    if not api_base or not email or not password:
+        raise HTTPException(400, "请先配置 SkyMail API Base、管理员邮箱和密码")
+    try:
+        token = fetch_skymail_token(api_base, email, password)
+    except SkyMailAuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    persist_skymail_token(token)
+    return {"ok": True, "skymail_token": token}

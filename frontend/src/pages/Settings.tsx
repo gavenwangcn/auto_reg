@@ -111,11 +111,13 @@ const TAB_ITEMS = [
       {
         title: 'SkyMail',
         provider: 'skymail',
-        desc: 'CloudMail 兼容接口（addUser / emailList）',
+        desc: 'CloudMail 兼容接口；填写管理员邮箱和密码后自动获取 Token',
         fields: [
-          { key: 'skymail_api_base', label: 'API Base', placeholder: 'https://api.skymail.ink' },
-          { key: 'skymail_token', label: 'Authorization Token', secret: true },
-          { key: 'skymail_domain', label: '邮箱域名', placeholder: 'mail.example.com' },
+          { key: 'skymail_api_base', label: 'API Base', placeholder: 'https://mail.ongird.com' },
+          { key: 'skymail_email', label: '管理员邮箱', placeholder: 'admin@example.com' },
+          { key: 'skymail_password', label: '管理员密码', secret: true },
+          { key: 'skymail_domain', label: '邮箱域名', placeholder: 'example.com' },
+          { key: 'skymail_token', label: 'Authorization Token（自动刷新）', secret: true, placeholder: '留空则根据邮箱密码自动获取' },
         ],
       },
       {
@@ -453,6 +455,57 @@ function ConfigSection({ section }: { section: SectionConfig }) {
   )
 }
 
+function SkyMailConfigSection({ form }: { form: any }) {
+  const { message: msg } = App.useApp()
+  const [refreshing, setRefreshing] = useState(false)
+
+  const refreshToken = async () => {
+    const values = form.getFieldsValue([
+      'skymail_api_base',
+      'skymail_email',
+      'skymail_password',
+    ])
+    if (!values.skymail_api_base || !values.skymail_email || !values.skymail_password) {
+      msg.error('请先填写 API Base、管理员邮箱和密码')
+      return
+    }
+    setRefreshing(true)
+    try {
+      const result = await apiFetch('/config/skymail/refresh-token', {
+        method: 'POST',
+        body: JSON.stringify({
+          skymail_api_base: values.skymail_api_base,
+          skymail_email: values.skymail_email,
+          skymail_password: values.skymail_password,
+        }),
+      })
+      form.setFieldValue('skymail_token', result.skymail_token || '')
+      msg.success('Token 已刷新')
+    } catch (e: any) {
+      msg.error(e?.message || '刷新 Token 失败')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  return (
+    <Card
+      title="SkyMail Token"
+      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>注册任务启动时也会自动刷新</span>}
+      style={{ marginBottom: 16 }}
+    >
+      <Space wrap>
+        <Button icon={<SyncOutlined />} loading={refreshing} onClick={refreshToken}>
+          测试并刷新 Token
+        </Button>
+        <Typography.Text type="secondary">
+          保存邮箱和密码后，可手动测试；任务运行时会自动调用 genToken。
+        </Typography.Text>
+      </Space>
+    </Card>
+  )
+}
+
 function MailboxSections({ form, sections }: { form: any; sections: SectionConfig[] }) {
   const selectedProvider = Form.useWatch('mail_provider', form) || 'luckmail'
   const baseSections = sections.filter((section) => !section.provider)
@@ -479,6 +532,7 @@ function MailboxSections({ form, sections }: { form: any; sections: SectionConfi
           )}
         </Card>
       ) : null}
+      {selectedProvider === 'skymail' ? <SkyMailConfigSection form={form} /> : null}
     </>
   )
 }

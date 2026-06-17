@@ -643,6 +643,8 @@ export default function Accounts() {
         moemail_api_url: cfg.moemail_api_url,
         moemail_api_key: cfg.moemail_api_key,
         skymail_api_base: cfg.skymail_api_base,
+        skymail_email: cfg.skymail_email,
+        skymail_password: cfg.skymail_password,
         skymail_token: cfg.skymail_token,
         skymail_domain: cfg.skymail_domain,
         duckmail_address: cfg.duckmail_address,
