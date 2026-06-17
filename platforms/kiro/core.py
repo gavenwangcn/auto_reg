@@ -223,8 +223,11 @@ class KiroRegister:
 
     def _init_browser(self):
         self.pw = sync_playwright().start()
+        headless = self.headless
+        if not headless and not os.getenv("DISPLAY"):
+            headless = True
         launch_opts = {
-            "headless": self.headless,
+            "headless": headless,
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",

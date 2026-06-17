@@ -1,7 +1,19 @@
 """Kiro 平台插件 - 基于 AWS Builder ID 注册"""
+import os
+
 from core.base_platform import BasePlatform, Account, AccountStatus, RegisterConfig
 from core.base_mailbox import BaseMailbox
 from core.registry import register
+
+
+def _resolve_kiro_headless(config: RegisterConfig | None) -> bool:
+    """Linux 服务器无 DISPLAY 时必须 headless，否则 Playwright 无法启动。"""
+    executor = str(getattr(config, "executor_type", "") or "protocol").strip().lower()
+    if executor == "headed":
+        return False
+    if executor == "headless":
+        return True
+    return not bool(os.getenv("DISPLAY"))
 
 
 @register
@@ -20,7 +32,7 @@ class KiroPlatform(BasePlatform):
         proxy = self.config.proxy
         laoudo_account_id = self.config.extra.get("laoudo_account_id", "")
 
-        reg = KiroRegister(proxy=proxy, tag="KIRO")
+        reg = KiroRegister(proxy=proxy, tag="KIRO", headless=_resolve_kiro_headless(self.config))
         log_fn = getattr(self, '_log_fn', print)
         reg.log = lambda msg: log_fn(msg)
 
@@ -122,7 +134,11 @@ class KiroPlatform(BasePlatform):
                 return {"ok": False, "error": "当前账号缺少 accessToken，无法切换到桌面应用"}
             if not refresh_token or not client_id or not client_secret:
                 if account.email and account.password:
-                    reg = KiroRegister(proxy=self.config.proxy, tag="KIRO-SWITCH")
+                    reg = KiroRegister(
+                        proxy=self.config.proxy,
+                        tag="KIRO-SWITCH",
+                        headless=_resolve_kiro_headless(self.config),
+                    )
                     reg.log = getattr(self, "_log_fn", print)
                     otp_callback = None
                     mailbox_extra = dict(self.config.extra or {})
