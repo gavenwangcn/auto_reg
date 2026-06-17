@@ -3,7 +3,10 @@ import re
 import sys
 
 URL = "https://auth.openblocklabs.com/sign-up"
-PARAMS = {"redirect_uri": "https://dashboard.openblocklabs.com/auth/callback"}
+AUTH_ROOT = "https://auth.openblocklabs.com/"
+CLIENT_ID = "client_01K8YDZSSKDMK8GYTEHBAW4N4S"
+REDIRECT_URI = "https://dashboard.openblocklabs.com/auth/callback"
+PARAMS = {"redirect_uri": REDIRECT_URI}
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
@@ -24,13 +27,21 @@ def extract_action_id(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def fetch_auth_root_page(session, session_id: str):
+    from urllib.parse import urlencode
+
+    root_url = f"{AUTH_ROOT}?{urlencode({'client_id': CLIENT_ID, 'redirect_uri': REDIRECT_URI, 'authorization_session_id': session_id})}"
+    return session.get(root_url, allow_redirects=True, timeout=30)
+
+
 def fetch_with_curl_cffi():
     from curl_cffi import requests
 
     s = requests.Session()
     s.impersonate = "chrome131"
     s.headers.update({"user-agent": UA})
-    return s.get(URL, params=PARAMS, allow_redirects=True, timeout=30)
+    resp = s.get(URL, params=PARAMS, allow_redirects=True, timeout=30)
+    return s, resp
 
 
 def fetch_with_urllib():
@@ -49,7 +60,7 @@ def fetch_with_urllib():
 def main() -> int:
     backend = "curl_cffi"
     try:
-        resp = fetch_with_curl_cffi()
+        session, resp = fetch_with_curl_cffi()
         final_url = str(resp.url)
         text = resp.text
         status = resp.status_code
@@ -57,9 +68,18 @@ def main() -> int:
         backend = "urllib"
         final_url, text = fetch_with_urllib()
         status = 200
+        session = None
 
     action_id, pattern = extract_action_id(text)
     session_match = re.search(r"authorization_session_id=([^&]+)", final_url)
+
+    if not action_id and session_match and session is not None:
+        root_resp = fetch_auth_root_page(session, session_match.group(1))
+        action_id, pattern = extract_action_id(root_resp.text)
+        if action_id:
+            pattern = f"root_page:{pattern}"
+            text = root_resp.text
+            final_url = str(root_resp.url)
 
     print(f"backend: {backend}")
     print(f"status: {status}")

@@ -160,6 +160,47 @@ class OpenBlockLabsRegister:
             allow_redirects=False,
         )
 
+    def _sync_session_from_response(self, r) -> str:
+        final_url = str(r.url)
+        parsed = urlparse(final_url)
+        qs = parse_qs(parsed.query)
+        session_id = qs.get("authorization_session_id", [None])[0]
+        if session_id:
+            self.authorization_session_id = session_id
+        if not self.authorization_session_id:
+            for rr in r.history:
+                loc = rr.headers.get("location", "")
+                m = re.search(r"authorization_session_id=([^&]+)", loc)
+                if m:
+                    self.authorization_session_id = m.group(1)
+                    break
+        return final_url
+
+    def _fetch_auth_root_page(self) -> bool:
+        """curl_cffi 有时停在 /sign-up，需再拉取 / 页面才有 next-action ID。"""
+        if not self.authorization_session_id:
+            return False
+        root_url = f"{AUTH_BASE}/?" + urlencode(
+            {
+                "client_id": CLIENT_ID,
+                "redirect_uri": DASHBOARD_CALLBACK,
+                "authorization_session_id": self.authorization_session_id,
+            }
+        )
+        self.log("  补拉 GET /?client_id=... 解析 next-action ID")
+        r = self.s.get(
+            root_url,
+            headers=self._get_headers(),
+            allow_redirects=True,
+        )
+        self._sync_session_from_response(r)
+        self._action_id = self._extract_action_id(r.text)
+        if self._action_id:
+            self.log(f"  根路径页面 action={self._action_id[:16]}...")
+        else:
+            self.log(f"  根路径仍未解析到 action, html_len={len(r.text)}")
+        return bool(self._action_id)
+
     def step1_initiate_signup(self) -> bool:
         """GET auth.openblocklabs.com/sign-up → authorization_session_id + action ID"""
         self.log("Step1: GET /sign-up")
@@ -174,23 +215,17 @@ class OpenBlockLabsRegister:
                 break
             self.log(f"  CF拦截 (status={r.status_code}), 重试 {attempt + 1}/5...")
             time.sleep(2)
-        final_url = str(r.url)
-        parsed = urlparse(final_url)
-        qs = parse_qs(parsed.query)
-        self.authorization_session_id = qs.get("authorization_session_id", [None])[0]
-        if not self.authorization_session_id:
-            for rr in r.history:
-                loc = rr.headers.get("location", "")
-                m = re.search(r"authorization_session_id=([^&]+)", loc)
-                if m:
-                    self.authorization_session_id = m.group(1)
-                    break
+        final_url = self._sync_session_from_response(r)
         self._action_id = self._extract_action_id(r.text)
+        self.log(
+            f"  final_url={final_url[:120]}..."
+        )
         self.log(
             f"  session_id={self.authorization_session_id}, action={self._action_id and self._action_id[:16]}..."
         )
         if not self._action_id:
-            self.log(f"  未解析到 next-action ID, html_len={len(r.text)}")
+            self.log(f"  首次页面未解析到 next-action ID, html_len={len(r.text)}")
+            self._fetch_auth_root_page()
         return bool(self.authorization_session_id and self._action_id)
 
     def step2_get_signup_page(self) -> bool:
@@ -226,6 +261,8 @@ class OpenBlockLabsRegister:
             router_state,
         )
         self.log(f"  -> {resp.status_code}")
+        if resp.status_code != 303:
+            self.log(f"  body[:300]: {(resp.text or '')[:300]}")
         return resp.status_code == 303
 
     def step4_get_password_page(self) -> bool:
