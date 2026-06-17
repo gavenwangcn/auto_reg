@@ -7,13 +7,12 @@ from core.registry import register
 
 
 def _resolve_kiro_headless(config: RegisterConfig | None) -> bool:
-    """Linux 服务器无 DISPLAY 时必须 headless，否则 Playwright 无法启动。"""
+    """仅当用户显式选择 headed 且环境有 DISPLAY 时才用有头模式，否则一律 headless。"""
+    has_display = bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
     executor = str(getattr(config, "executor_type", "") or "protocol").strip().lower()
-    if executor == "headed":
+    if executor == "headed" and has_display:
         return False
-    if executor == "headless":
-        return True
-    return not bool(os.getenv("DISPLAY"))
+    return True
 
 
 @register

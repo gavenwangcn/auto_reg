@@ -223,8 +223,9 @@ class KiroRegister:
 
     def _init_browser(self):
         self.pw = sync_playwright().start()
+        has_display = bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
         headless = self.headless
-        if not headless and not os.getenv("DISPLAY"):
+        if not headless and not has_display:
             headless = True
         launch_opts = {
             "headless": headless,
@@ -236,7 +237,16 @@ class KiroRegister:
         if self.proxy:
             launch_opts["proxy"] = {"server": self.proxy}
 
-        self.browser = self.pw.chromium.launch(**launch_opts)
+        try:
+            self.browser = self.pw.chromium.launch(**launch_opts)
+        except Exception as exc:
+            if headless:
+                raise
+            self.log(f"有头浏览器启动失败，回退 headless: {exc}")
+            launch_opts["headless"] = True
+            self.headless = True
+            self.browser = self.pw.chromium.launch(**launch_opts)
+        self.log(f"Playwright headless={launch_opts['headless']}")
         profile = self._build_random_profile()
 
         env_locale = os.getenv("KIRO_LOCALE", "").strip()
