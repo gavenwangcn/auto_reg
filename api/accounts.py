@@ -101,10 +101,17 @@ def export_accounts(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["platform", "email", "password", "user_id", "region",
-                     "status", "cashier_url", "created_at"])
+                     "status", "cashier_url", "access_token", "refresh_token",
+                     "created_at"])
     for acc in accounts:
+        extra = json.loads(acc.extra_json or "{}")
+        access_token = acc.token or extra.get("access_token", "")
+        if acc.platform == "openblocklabs" and not access_token:
+            access_token = extra.get("wos_session", "")
+        refresh_token = extra.get("refresh_token", "")
         writer.writerow([acc.platform, acc.email, acc.password, acc.user_id,
                          acc.region, acc.status, acc.cashier_url,
+                         access_token, refresh_token,
                          acc.created_at.strftime("%Y-%m-%d %H:%M:%S")])
     output.seek(0)
     return StreamingResponse(

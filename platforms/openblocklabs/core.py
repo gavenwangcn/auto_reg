@@ -27,6 +27,7 @@ AUTH_BASE = "https://auth.openblocklabs.com"
 DASHBOARD_BASE = "https://dashboard.openblocklabs.com"
 DASHBOARD_CALLBACK = f"{DASHBOARD_BASE}/auth/callback"
 CLIENT_ID = "client_01K8YDZSSKDMK8GYTEHBAW4N4S"
+WORKOS_AUTH_URL = "https://api.workos.com/user_management/authenticate"
 # ────────────────────────────────────────────────────────────────────────────
 
 UA = (
@@ -633,6 +634,43 @@ class OpenBlockLabsRegister:
         self.log(f"  auth_code={auth_code}")
         return auth_code
 
+    def step7b_exchange_workos_tokens(self, auth_code: str) -> dict:
+        """POST WorkOS authenticate → access_token / refresh_token / authkit_authorization_code"""
+        self.log("Step7b: POST WorkOS /user_management/authenticate")
+        payload = {
+            "client_id": CLIENT_ID,
+            "grant_type": "authorization_code",
+            "code": auth_code,
+        }
+        r = self.s.post(
+            WORKOS_AUTH_URL,
+            json=payload,
+            headers={"Content-Type": "application/json", "accept": "application/json"},
+        )
+        self.log(f"  -> {r.status_code}")
+        if r.status_code != 200:
+            self.log(f"  body[:400]: {r.text[:400]}")
+            return {}
+        try:
+            data = r.json()
+        except json.JSONDecodeError:
+            self.log(f"  invalid JSON: {r.text[:200]}")
+            return {}
+        user = data.get("user") or {}
+        tokens = {
+            "access_token": data.get("access_token") or "",
+            "refresh_token": data.get("refresh_token") or "",
+            "authkit_authorization_code": data.get("authkit_authorization_code") or "",
+            "user_id": user.get("id") or "",
+            "organization_id": data.get("organization_id") or "",
+        }
+        self.log(
+            f"  access_token={'Y' if tokens['access_token'] else 'N'} "
+            f"refresh_token={'Y' if tokens['refresh_token'] else 'N'} "
+            f"authkit_code={'Y' if tokens['authkit_authorization_code'] else 'N'}"
+        )
+        return tokens
+
     def step8_exchange_callback(self, auth_code: str) -> str:
         """GET dashboard/auth/callback?code=... → wos-session cookie"""
         self.log("Step8: GET /auth/callback")
@@ -646,12 +684,15 @@ class OpenBlockLabsRegister:
                 return c.value
         return None
 
-    def step9_create_personal_org(self) -> bool:
+    def step9_create_personal_org(self, access_token: str = None) -> bool:
         """GET /api/create-personal-org → 完成组织创建"""
         self.log("Step9: GET /api/create-personal-org")
+        headers = self._get_headers(referer=f"{DASHBOARD_BASE}/")
+        if access_token:
+            headers["authorization"] = f"Bearer {access_token}"
         r = self.s.get(
             f"{DASHBOARD_BASE}/api/create-personal-org",
-            headers=self._get_headers(referer=f"{DASHBOARD_BASE}/"),
+            headers=headers,
             allow_redirects=True,
         )
         self.log(f"  -> {r.status_code} final={str(r.url)[:80]}")
@@ -706,20 +747,31 @@ class OpenBlockLabsRegister:
         if not auth_code:
             return {"success": False, "error": "submit_otp failed / no auth_code"}
 
-        session_token = self.step8_exchange_callback(auth_code)
-        if not session_token:
+        tokens = self.step7b_exchange_workos_tokens(auth_code)
+        access_token = tokens.get("access_token") or ""
+        refresh_token = tokens.get("refresh_token") or ""
+        if not access_token and not refresh_token:
             return {
                 "success": False,
-                "error": "exchange_callback failed / no wos-session",
+                "error": "workos token exchange failed / no access or refresh token",
             }
 
-        self.step9_create_personal_org()
+        callback_code = tokens.get("authkit_authorization_code") or auth_code
+        session_token = self.step8_exchange_callback(callback_code)
+        if not session_token:
+            self.log("  wos-session 未获取，继续使用 Bearer access_token 完成后续步骤")
+
+        self.step9_create_personal_org(access_token=access_token or None)
 
         result = {
             "success": True,
             "email": email,
             "password": password,
-            "wos_session": session_token,
+            "wos_session": session_token or "",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user_id": tokens.get("user_id") or "",
+            "organization_id": tokens.get("organization_id") or "",
         }
         self.log(f"注册成功: {email}")
         return result

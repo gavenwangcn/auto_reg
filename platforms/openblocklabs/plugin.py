@@ -61,9 +61,21 @@ class OpenBlockLabsPlatform(BasePlatform):
             email=result["email"],
             password=result["password"],
             status=AccountStatus.REGISTERED,
-            extra={"wos_session": result.get("wos_session", "")},
-            token=result.get("wos_session", ""),
+            user_id=result.get("user_id", ""),
+            extra={
+                "wos_session": result.get("wos_session", ""),
+                "access_token": result.get("access_token", ""),
+                "refresh_token": result.get("refresh_token", ""),
+                "user_id": result.get("user_id", ""),
+                "organization_id": result.get("organization_id", ""),
+            },
+            token=result.get("access_token", "") or result.get("wos_session", ""),
         )
 
     def check_valid(self, account: Account) -> bool:
-        return bool(account.extra.get("wos_session"))
+        extra = account.extra or {}
+        return bool(
+            extra.get("access_token")
+            or extra.get("refresh_token")
+            or extra.get("wos_session")
+        )

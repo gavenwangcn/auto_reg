@@ -553,16 +553,39 @@ export default function Accounts() {
 
   const getRefreshToken = (record: any): string => {
     try {
-      const extra = JSON.parse(record.extra_json || '{}')
+      const extra = record.extra || JSON.parse(record.extra_json || '{}')
       return extra.refresh_token || ''
     } catch {
       return ''
     }
   }
 
+  const getAccessToken = (record: any): string => {
+    try {
+      const extra = record.extra || JSON.parse(record.extra_json || '{}')
+      if (currentPlatform === 'openblocklabs') {
+        return record.token || extra.access_token || extra.wos_session || ''
+      }
+      return record.token || extra.access_token || ''
+    } catch {
+      return record.token || ''
+    }
+  }
+
+  const csvEscape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`
+
   const exportCsv = () => {
-    const header = 'email,password,status,region,cashier_url,created_at'
-    const rows = accounts.map((a) => [a.email, a.password, a.status, a.region, a.cashier_url, a.created_at].join(','))
+    const includeTokens = currentPlatform === 'openblocklabs' || currentPlatform === 'chatgpt'
+    const header = includeTokens
+      ? 'email,password,access_token,refresh_token,status,region,cashier_url,created_at'
+      : 'email,password,status,region,cashier_url,created_at'
+    const rows = accounts.map((a) => {
+      const base = [a.email, a.password, a.status, a.region, a.cashier_url, a.created_at]
+      if (!includeTokens) return base.map(csvEscape).join(',')
+      return [a.email, a.password, getAccessToken(a), getRefreshToken(a), a.status, a.region, a.cashier_url, a.created_at]
+        .map(csvEscape)
+        .join(',')
+    })
     const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -1338,28 +1361,33 @@ export default function Accounts() {
             </Form>
             {(() => {
               const rt = getRefreshToken(currentAccount)
-              if (!rt) return null
+              const showRefresh = currentPlatform === 'openblocklabs' || currentPlatform === 'chatgpt' || Boolean(rt)
+              if (!showRefresh) return null
               return (
                 <div style={{ marginTop: 8 }}>
                   <div style={{ marginBottom: 4, fontWeight: 500, fontSize: 13 }}>Refresh Token</div>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 8,
-                      background: token.colorFillAlter,
-                      border: `1px solid ${token.colorBorder}`,
-                      borderRadius: token.borderRadius,
-                      padding: '8px 10px',
-                    }}
-                  >
-                    <Text
-                      style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
-                      copyable={{ text: rt, tooltips: ['复制 RT', '已复制'] }}
+                  {rt ? (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 8,
+                        background: token.colorFillAlter,
+                        border: `1px solid ${token.colorBorder}`,
+                        borderRadius: token.borderRadius,
+                        padding: '8px 10px',
+                      }}
                     >
-                      {rt}
-                    </Text>
-                  </div>
+                      <Text
+                        style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all', flex: 1, userSelect: 'text' }}
+                        copyable={{ text: rt, tooltips: ['复制 RT', '已复制'] }}
+                      >
+                        {rt}
+                      </Text>
+                    </div>
+                  ) : (
+                    <Text type="secondary">暂无 Refresh Token</Text>
+                  )}
                 </div>
               )
             })()}
